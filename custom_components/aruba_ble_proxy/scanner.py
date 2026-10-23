@@ -95,6 +95,19 @@ class ArubaBleRemoteScanner:
         return self._scanner.async_setup()
 
     def async_on_payload(self, payload: BluetoothPayload) -> None:
+        raw_method = getattr(self._scanner, "_async_on_raw_advertisement", None)
+        if payload.raw and callable(raw_method):
+            # Use HA's shared parser and repeated-packet fast path, as ESPHome
+            # does. Older HA versions retain the parsed callbacks below.
+            raw_method(
+                payload.address,
+                payload.rssi,
+                payload.raw,
+                {},
+                payload.time,
+            )
+            return
+
         if hasattr(self._scanner, "_async_on_advertisement_internal"):
             _call_advertisement_method(
                 self._scanner._async_on_advertisement_internal,
