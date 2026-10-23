@@ -223,6 +223,8 @@ def _call_advertisement_method(method: Any, payload: BluetoothPayload, *, includ
     args = (
         payload.address,
         payload.rssi,
+        # Keep absent local names absent so HA can merge advertisements and
+        # scan responses without replacing a learned name with a MAC address.
         payload.name,
         payload.service_uuids,
         payload.service_data,
