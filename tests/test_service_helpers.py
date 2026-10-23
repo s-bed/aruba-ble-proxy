@@ -9,6 +9,7 @@ from custom_components import aruba_ble_proxy as integration_module
 from custom_components.aruba_ble_proxy import (
     _endpoint_url,
     _parse_hex_value,
+    _listener_for_capture,
     _runtime_for_ap,
     _service_data_to_config,
     async_remove_entry,
@@ -26,6 +27,9 @@ from custom_components.aruba_ble_proxy.const import (
     CONF_TRANSPORT_PREFIX,
     DOMAIN,
     ENTRY_TYPE_AP_SOURCE,
+    ENTRY_TYPE_LISTENER,
+    SERVICE_START_CAPTURE,
+    SERVICE_STOP_CAPTURE,
 )
 
 
@@ -157,11 +161,12 @@ def test_removing_listener_removes_its_ap_child_entries_only():
     assert Hass.config_entries.removed == ["own-child"]
 
 
-def test_services_are_registered_as_admin_only(monkeypatch):
+def _register_services(monkeypatch, hass):
     registrations = []
 
     class SupportsResponse:
         ONLY = "only"
+        OPTIONAL = "optional"
 
     core = types.ModuleType("homeassistant.core")
     core.SupportsResponse = SupportsResponse
@@ -169,8 +174,11 @@ def test_services_are_registered_as_admin_only(monkeypatch):
     service_helpers.async_register_admin_service = (
         lambda *args, **kwargs: registrations.append((args, kwargs))
     )
+    exceptions = types.ModuleType("homeassistant.exceptions")
+    exceptions.ServiceValidationError = type("ServiceValidationError", (ValueError,), {})
     monkeypatch.setitem(sys.modules, "homeassistant.core", core)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.service", service_helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.exceptions", exceptions)
     monkeypatch.setattr(integration_module, "_cli_service_schema", lambda: object())
     monkeypatch.setattr(
         integration_module,
@@ -187,12 +195,150 @@ def test_services_are_registered_as_admin_only(monkeypatch):
         "_gatt_notify_service_schema",
         lambda: object(),
     )
+    monkeypatch.setattr(
+        integration_module,
+        "_capture_service_schema",
+        lambda **kwargs: object(),
+    )
 
-    asyncio.run(integration_module.async_setup(types.SimpleNamespace(), {}))
+    asyncio.run(integration_module.async_setup(hass, {}))
+    return registrations
 
-    assert len(registrations) == 7
+
+def test_services_are_registered_as_admin_only(monkeypatch):
+    registrations = _register_services(monkeypatch, types.SimpleNamespace())
+
+    assert len(registrations) == 9
     assert all(call[0][0].__class__ is types.SimpleNamespace for call in registrations)
-    assert all(call[1]["supports_response"] == SupportsResponse.ONLY for call in registrations)
+    assert all(
+        call[1]["supports_response"] == (
+            "optional" if call[0][2] in {SERVICE_START_CAPTURE, SERVICE_STOP_CAPTURE} else "only"
+        )
+        for call in registrations
+    )
+
+
+def _capture_hass(entries):
+    return types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: entries)
+    )
+
+
+def _listener(entry_id, runtime=None):
+    return types.SimpleNamespace(
+        entry_id=entry_id,
+        data={CONF_ENTRY_TYPE: ENTRY_TYPE_LISTENER},
+        runtime_data=runtime,
+    )
+
+
+def test_capture_listener_selection_requires_explicit_id_with_multiple_listeners():
+    first = _listener("first", object())
+    second = _listener("second", object())
+    hass = _capture_hass([first, second])
+
+    with pytest.raises(ValueError, match="Specify entry_id"):
+        _listener_for_capture(hass)
+
+    assert _listener_for_capture(hass, "second") == ("second", second.runtime_data)
+
+
+def test_capture_listener_selection_resolves_ap_to_parent_without_filtering_ap():
+    parent = _listener("listener", object())
+    child = types.SimpleNamespace(
+        entry_id="ap",
+        data={CONF_ENTRY_TYPE: ENTRY_TYPE_AP_SOURCE, CONF_PARENT_ENTRY_ID: "listener"},
+    )
+    hass = _capture_hass([child, parent])
+
+    assert _listener_for_capture(hass) == ("listener", parent.runtime_data)
+    assert _listener_for_capture(hass, "ap") == ("listener", parent.runtime_data)
+
+
+@pytest.mark.parametrize("entry_id", [None, "listener", "missing"])
+def test_capture_listener_selection_rejects_missing_or_unloaded_entry(entry_id):
+    with pytest.raises(ValueError):
+        _listener_for_capture(_capture_hass([_listener("listener")]), entry_id)
+
+
+def test_capture_listener_selection_rejects_absent_listener_or_orphan_ap():
+    with pytest.raises(ValueError, match="No Aruba BLE Proxy listener"):
+        _listener_for_capture(_capture_hass([]))
+
+    child = types.SimpleNamespace(
+        entry_id="ap",
+        data={CONF_ENTRY_TYPE: ENTRY_TYPE_AP_SOURCE, CONF_PARENT_ENTRY_ID: "missing"},
+    )
+    with pytest.raises(ValueError, match="no Aruba BLE Proxy listener"):
+        _listener_for_capture(_capture_hass([child]), "ap")
+
+
+def test_capture_services_route_parameters_return_status_and_allow_normal_actions(monkeypatch):
+    class Runtime:
+        def start_packet_capture(self, **kwargs):
+            self.settings = kwargs
+            return {"active": True, "packet_count": 0}
+
+        def stop_packet_capture(self):
+            return {"active": False, "packet_count": 2}
+
+    runtime = Runtime()
+    hass = _capture_hass([_listener("listener", runtime)])
+    registrations = _register_services(monkeypatch, hass)
+    services = {args[2]: args[3] for args, kwargs in registrations}
+    settings = {"device_mac": "AA:BB:CC:DD:EE:FF", "timeout": 120, "max_bytes": 2048}
+
+    async def run_test():
+        response = await services[SERVICE_START_CAPTURE](
+            types.SimpleNamespace(data=settings, return_response=True)
+        )
+        assert runtime.settings == settings
+        assert response["entry_id"] == "listener"
+        assert response["packet_capture"] == {"active": True, "packet_count": 0}
+        assert "Download diagnostics" in response["download"]
+        assert "packets" not in response["packet_capture"]
+
+        response = await services[SERVICE_STOP_CAPTURE](
+            types.SimpleNamespace(data={"entry_id": "listener"}, return_response=True)
+        )
+        assert response["packet_capture"] == {"active": False, "packet_count": 2}
+
+        assert await services[SERVICE_START_CAPTURE](
+            types.SimpleNamespace(data=settings, return_response=False)
+        ) is None
+        assert await services[SERVICE_STOP_CAPTURE](
+            types.SimpleNamespace(data={}, return_response=False)
+        ) is None
+
+    asyncio.run(run_test())
+
+
+def test_capture_services_report_validation_errors(monkeypatch):
+    class Runtime:
+        def start_packet_capture(self, **kwargs):
+            raise ValueError("A packet capture is already active")
+
+    services = {
+        args[2]: args[3]
+        for args, kwargs in _register_services(
+            monkeypatch, _capture_hass([_listener("listener", Runtime())])
+        )
+    }
+
+    async def run_test():
+        with pytest.raises(ValueError, match="already active") as error:
+            await services[SERVICE_START_CAPTURE](
+                types.SimpleNamespace(
+                    data={"timeout": 60, "max_bytes": 1024}, return_response=True
+                )
+            )
+        assert type(error.value).__name__ == "ServiceValidationError"
+        with pytest.raises(ValueError, match="does not exist"):
+            await services[SERVICE_STOP_CAPTURE](
+                types.SimpleNamespace(data={"entry_id": "missing"}, return_response=True)
+            )
+
+    asyncio.run(run_test())
 
 
 def test_runtime_for_ap_normalizes_cli_service_source_mac():

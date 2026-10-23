@@ -83,6 +83,38 @@
     "gatt_notify": {
       "name": "Configura notifiche GATT Aruba",
       "description": "Abilita o disabilita notifiche GATT tramite un AP Aruba."
+    },
+    "start_capture": {
+      "name": "Avvia acquisizione pacchetti",
+      "description": "Acquisisce i messaggi Aruba ricevuti per scaricarli nei dati diagnostici JSON. Ometti il MAC del dispositivo per acquisire tutto il listener. Una nuova acquisizione sostituisce quella precedente completata.",
+      "fields": {
+        "entry_id": {
+          "name": "Listener",
+          "description": "Obbligatorio se sono configurati più listener. Una voce AP seleziona il listener padre e non limita i pacchetti a tale AP."
+        },
+        "device_mac": {
+          "name": "MAC dispositivo",
+          "description": "MAC BLE opzionale. Ometti per includere tutti i dispositivi e gli AP di questo listener."
+        },
+        "timeout": {
+          "name": "Durata massima",
+          "description": "Interrompe automaticamente dopo questo numero di secondi (1–300)."
+        },
+        "max_bytes": {
+          "name": "Limite dimensione acquisizione",
+          "description": "Limite di memoria in byte, inclusi JSON dei pacchetti e costi di archiviazione (1024–10485760). L’acquisizione si interrompe prima di superare il limite."
+        }
+      }
+    },
+    "stop_capture": {
+      "name": "Interrompi acquisizione pacchetti",
+      "description": "Interrompe l’acquisizione e mantiene i pacchetti nel JSON Scarica diagnostica del listener.",
+      "fields": {
+        "entry_id": {
+          "name": "Listener",
+          "description": "Obbligatorio se sono configurati più listener. Una voce AP seleziona il listener padre."
+        }
+      }
     }
   }
 }

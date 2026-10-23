@@ -83,6 +83,38 @@
     "gatt_notify": {
       "name": "Configure Aruba GATT notifications",
       "description": "Enable or disable GATT notifications through an Aruba AP."
+    },
+    "start_capture": {
+      "name": "Start packet capture",
+      "description": "Capture received Aruba messages for JSON diagnostics download. Omit device MAC to capture the whole listener. Starting a new capture replaces the previous completed capture.",
+      "fields": {
+        "entry_id": {
+          "name": "Listener",
+          "description": "Required when more than one listener is configured. An AP entry selects its parent listener; it does not filter to that AP."
+        },
+        "device_mac": {
+          "name": "Device MAC",
+          "description": "Optional BLE device MAC. Omit to include all devices and APs on this listener."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "Stop automatically after this many seconds (1–300)."
+        },
+        "max_bytes": {
+          "name": "Capture size limit",
+          "description": "Retained-memory budget in bytes, including packet JSON and storage overhead (1024–10485760). Capture stops before exceeding this limit."
+        }
+      }
+    },
+    "stop_capture": {
+      "name": "Stop packet capture",
+      "description": "Stop receiving debug packets and keep the capture available in the listener’s Download diagnostics JSON.",
+      "fields": {
+        "entry_id": {
+          "name": "Listener",
+          "description": "Required when more than one listener is configured. An AP entry selects its parent listener."
+        }
+      }
     }
   }
 }

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 
 import pytest
 
@@ -149,5 +151,96 @@ def test_receiver_closes_connection_after_repeated_decode_errors(monkeypatch):
         assert websocket.closed == [(1008, "invalid telemetry")]
         assert receiver.stats.decode_errors == 3
         assert receiver.stats.connections_closed == 1
+
+    asyncio.run(run_test())
+
+
+def _telemetry_packet(receiver, *, token="secret", device="112233445566"):
+    message = receiver.decoder._pb.telemetry_cls()
+    message.meta.version = 1
+    message.meta.access_token = token
+    message.reporter.mac = bytes.fromhex("020000000001")
+    frame = message.bleData.add()
+    frame.mac = bytes.fromhex(device)
+    frame.data = b"\x02\x01\x06" * 30
+    frame.rssi = -61
+    return message.SerializeToString()
+
+
+def test_receiver_captures_full_payload_without_affecting_event_delivery():
+    async def run_test():
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        receiver = ArubaBleReceiver(access_token="secret", event_handler=on_event)
+        receiver.capture.start()
+        await receiver._handle_connection(_Socket([_telemetry_packet(receiver)]))
+        receiver.capture.stop()
+
+        capture = receiver.capture.export()
+        assert len(events) == 1
+        assert capture["packet_count"] == 1
+        packet = capture["packets"][0]
+        assert packet["peer"] == "192.0.2.1:12345"
+        assert packet["connection_id"] == 1
+        payload = packet["telemetry"]["bleData"][0]["data"]
+        assert base64.b64decode(payload) == events[0].payload == b"\x02\x01\x06" * 30
+        assert "secret" not in json.dumps(capture)
+
+    asyncio.run(run_test())
+
+
+def test_receiver_capture_covers_all_connections_and_filters_device_records():
+    async def run_test():
+        async def ignore_event(event):
+            pass
+
+        receiver = ArubaBleReceiver(access_token="secret", event_handler=ignore_event)
+        receiver.capture.start(device_mac="11:22:33:44:55:66")
+        await receiver._handle_connection(_Socket([_telemetry_packet(receiver)]))
+        await receiver._handle_connection(_Socket([
+            _telemetry_packet(receiver, device="aabbccddeeff"),
+            _telemetry_packet(receiver),
+        ]))
+        receiver.capture.stop()
+
+        capture = receiver.capture.export()
+        assert capture["packet_count"] == 2
+        assert [packet["connection_id"] for packet in capture["packets"]] == [1, 2]
+        assert receiver.stats.binary_messages == 3
+
+    asyncio.run(run_test())
+
+
+def test_receiver_capture_omits_unsafe_message_bodies_and_keeps_error_metadata():
+    async def run_test():
+        receiver = ArubaBleReceiver(access_token="secret")
+        receiver.capture.start()
+        await receiver._handle_connection(_Socket([
+            "secret text", b"\xffsecret", _telemetry_packet(receiver, token="wrong-secret"),
+        ]))
+        receiver.capture.stop()
+
+        capture = receiver.capture.export()
+        assert [packet["outcome"] for packet in capture["packets"]] == [
+            "text_ignored", "decode_error", "auth_error",
+        ]
+        assert all("telemetry" not in packet for packet in capture["packets"])
+        exported = json.dumps(capture)
+        assert "secret" not in exported
+        assert "wrong-secret" not in exported
+        assert receiver.stats.decode_errors == 1
+        assert receiver.stats.invalid_tokens == 1
+
+    asyncio.run(run_test())
+
+
+def test_receiver_keeps_no_packet_history_until_capture_is_started():
+    async def run_test():
+        receiver = ArubaBleReceiver(access_token="secret")
+        await receiver._handle_connection(_Socket([_telemetry_packet(receiver)]))
+        assert receiver.capture.export()["packets"] == []
 
     asyncio.run(run_test())

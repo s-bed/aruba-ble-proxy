@@ -6,12 +6,19 @@ from .const import CONF_ACCESS_TOKEN, CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_AP_SOU
 
 
 async def async_get_config_entry_diagnostics(hass, entry) -> dict[str, Any]:
-    redacted_data = _redact_credentials(entry.data)
+    tokens = tuple(
+        token
+        for token in (
+            entry.data.get(CONF_ACCESS_TOKEN), entry.options.get(CONF_ACCESS_TOKEN)
+        )
+        if isinstance(token, str) and token
+    )
+    redacted_data = _redact_credentials(entry.data, tokens)
 
     payload: dict[str, Any] = {
         "domain": DOMAIN,
         "entry": redacted_data,
-        "options": _redact_credentials(entry.options),
+        "options": _redact_credentials(entry.options, tokens),
     }
     if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_AP_SOURCE:
         payload["runtime"] = None
@@ -26,12 +33,24 @@ async def async_get_config_entry_diagnostics(hass, entry) -> dict[str, Any]:
     runtime_payload["receiver_connected_sources"] = sorted(
         runtime_payload.get("receiver_connected_sources", [])
     )
-    payload["runtime"] = runtime_payload
+    payload["runtime"] = _redact_credentials(runtime_payload, tokens)
+    payload["packet_capture"] = runtime.export_packet_capture()
     return payload
 
 
-def _redact_credentials(data) -> dict[str, Any]:
-    redacted = dict(data)
-    if CONF_ACCESS_TOKEN in redacted:
-        redacted[CONF_ACCESS_TOKEN] = "***redacted***"
-    return redacted
+def _redact_credentials(data, tokens: tuple[str, ...] = ()):
+    if isinstance(data, dict):
+        return {
+            key: (
+                "***redacted***"
+                if str(key).replace("_", "").lower() in {"accesstoken", "token"}
+                else _redact_credentials(value, tokens)
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, (list, tuple)):
+        return [_redact_credentials(value, tokens) for value in data]
+    if isinstance(data, str):
+        for token in tokens:
+            data = data.replace(token, "***redacted***")
+    return data

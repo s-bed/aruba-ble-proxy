@@ -210,3 +210,49 @@ gatt_notify:
       default: true
       selector:
         boolean:
+start_capture:
+  name: Start packet capture
+  description: Capture received Aruba messages for JSON diagnostics download. Omit device MAC to capture the whole listener. Starting a new capture replaces the previous completed capture.
+  fields:
+    entry_id:
+      name: Listener
+      description: Required when more than one listener is configured. An AP entry selects its parent listener; it does not filter to that AP.
+      selector:
+        config_entry:
+          integration: aruba_ble_proxy
+    device_mac:
+      name: Device MAC
+      description: Optional BLE device MAC. Omit to include messages from all devices and APs on this listener.
+      example: "AA:BB:CC:DD:EE:FF"
+      selector:
+        text:
+    timeout:
+      name: Timeout
+      description: Stop automatically after this many seconds.
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 300
+          unit_of_measurement: s
+          mode: box
+    max_bytes:
+      name: Capture size limit
+      description: Retained-memory budget in bytes, including packet JSON and storage overhead. Capture stops before the next packet would exceed this limit.
+      default: 1048576
+      selector:
+        number:
+          min: 1024
+          max: 10485760
+          unit_of_measurement: B
+          mode: box
+stop_capture:
+  name: Stop packet capture
+  description: Stop receiving debug packets and keep the capture available in the listener's Download diagnostics JSON.
+  fields:
+    entry_id:
+      name: Listener
+      description: Required when more than one listener is configured. An AP entry selects its parent listener.
+      selector:
+        config_entry:
+          integration: aruba_ble_proxy

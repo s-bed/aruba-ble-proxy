@@ -31,9 +31,14 @@ from .const import (
     CONF_RADIO_PROFILE,
     CONF_TRANSPORT_PREFIX,
     DEFAULT_ACTIVE_CONNECTION_SLOTS,
+    DEFAULT_CAPTURE_MAX_BYTES,
+    DEFAULT_CAPTURE_TIMEOUT,
     DEFAULT_ENDPOINT_PATH,
     DOMAIN,
     ENTRY_TYPE_AP_SOURCE,
+    MAX_CAPTURE_MAX_BYTES,
+    MAX_CAPTURE_TIMEOUT,
+    MIN_CAPTURE_MAX_BYTES,
     SERVICE_BLE_CONNECT,
     SERVICE_BLE_DISCONNECT,
     SERVICE_GENERATE_CLI,
@@ -41,6 +46,8 @@ from .const import (
     SERVICE_GATT_READ,
     SERVICE_GATT_NOTIFY,
     SERVICE_GATT_WRITE,
+    SERVICE_START_CAPTURE,
+    SERVICE_STOP_CAPTURE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -194,6 +201,30 @@ async def async_setup(hass, config: dict) -> bool:
             wait_result=call.data["wait_result"],
         )
 
+    async def _async_start_capture(call) -> dict | None:
+        from homeassistant.exceptions import ServiceValidationError
+
+        try:
+            entry_id, runtime = _listener_for_capture(hass, call.data.get("entry_id"))
+            status = runtime.start_packet_capture(
+                device_mac=call.data.get("device_mac"),
+                timeout=call.data["timeout"],
+                max_bytes=call.data["max_bytes"],
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        return _capture_service_response(entry_id, status) if call.return_response else None
+
+    async def _async_stop_capture(call) -> dict | None:
+        from homeassistant.exceptions import ServiceValidationError
+
+        try:
+            entry_id, runtime = _listener_for_capture(hass, call.data.get("entry_id"))
+            status = runtime.stop_packet_capture()
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        return _capture_service_response(entry_id, status) if call.return_response else None
+
     async_register_admin_service(
         hass,
         DOMAIN,
@@ -249,6 +280,22 @@ async def async_setup(hass, config: dict) -> bool:
         _async_gatt_notify,
         schema=_gatt_notify_service_schema(),
         supports_response=SupportsResponse.ONLY,
+    )
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_START_CAPTURE,
+        _async_start_capture,
+        schema=_capture_service_schema(start=True),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_STOP_CAPTURE,
+        _async_stop_capture,
+        schema=_capture_service_schema(start=False),
+        supports_response=SupportsResponse.OPTIONAL,
     )
     return True
 
@@ -343,6 +390,69 @@ def _gatt_notify_service_schema():
             vol.Optional("wait_result", default=True): cv.boolean,
         }
     )
+
+
+def _capture_service_schema(*, start: bool):
+    import voluptuous as vol
+    from homeassistant.helpers import config_validation as cv
+
+    schema = {vol.Optional("entry_id"): cv.string}
+    if start:
+        schema.update(
+            {
+                vol.Optional("device_mac"): vol.All(cv.string, vol.Length(max=32)),
+                vol.Optional("timeout", default=DEFAULT_CAPTURE_TIMEOUT): vol.All(
+                    cv.positive_int, vol.Range(min=1, max=MAX_CAPTURE_TIMEOUT)
+                ),
+                vol.Optional("max_bytes", default=DEFAULT_CAPTURE_MAX_BYTES): vol.All(
+                    cv.positive_int,
+                    vol.Range(min=MIN_CAPTURE_MAX_BYTES, max=MAX_CAPTURE_MAX_BYTES),
+                ),
+            }
+        )
+    return vol.Schema(schema)
+
+
+def _listener_for_capture(hass, entry_id: str | None = None):
+    """Select exactly one listener, resolving AP entries to their parent."""
+    entries = list(hass.config_entries.async_entries(DOMAIN))
+    by_id = {entry.entry_id: entry for entry in entries}
+    if entry_id is not None:
+        entry = by_id.get(entry_id)
+        if entry is None:
+            raise ValueError("The selected Aruba BLE Proxy entry does not exist")
+        if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_AP_SOURCE:
+            entry = by_id.get(entry.data.get(CONF_PARENT_ENTRY_ID))
+            if entry is None or entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_AP_SOURCE:
+                raise ValueError("The selected AP has no Aruba BLE Proxy listener")
+    else:
+        listeners = [
+            candidate
+            for candidate in entries
+            if candidate.data.get(CONF_ENTRY_TYPE) != ENTRY_TYPE_AP_SOURCE
+        ]
+        if len(listeners) != 1:
+            raise ValueError(
+                "Specify entry_id when more than one Aruba BLE Proxy listener is configured"
+                if listeners
+                else "No Aruba BLE Proxy listener is configured"
+            )
+        entry = listeners[0]
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        raise ValueError("The selected Aruba BLE Proxy listener is not loaded")
+    return entry.entry_id, runtime
+
+
+def _capture_service_response(entry_id: str, status: dict) -> dict:
+    return {
+        "entry_id": entry_id,
+        "packet_capture": status,
+        "download": (
+            "Open Settings > Devices & services > Aruba BLE Proxy, then the listener "
+            "entry menu > Download diagnostics. The JSON contains packet_capture."
+        ),
+    }
 
 
 def _runtime_for_ap(hass, ap_mac: str):

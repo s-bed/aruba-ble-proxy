@@ -12,6 +12,7 @@ from websockets.asyncio.server import serve
 
 from .aruba_proto import ArubaTelemetryDecoder, ArubaTelemetryMessage
 from .models import ArubaBleEvent
+from .packet_capture import PacketCapture
 
 LOGGER = logging.getLogger(__name__)
 EventHandler = Callable[[ArubaBleEvent], Awaitable[None]]
@@ -57,6 +58,10 @@ class ArubaBleReceiver:
         self.host = host
         self.port = port
         self.decoder = ArubaTelemetryDecoder(access_token=access_token)
+        self.capture = PacketCapture(
+            telemetry_cls=self.decoder._pb.telemetry_cls,
+            access_token=access_token,
+        )
         self.endpoint_path = _normalize_endpoint_path(endpoint_path)
         self.event_handler = event_handler or log_event
         self.message_handler = message_handler
@@ -70,6 +75,7 @@ class ArubaBleReceiver:
         self._sources_by_connection: dict[int, set[str]] = {}
         self._active_connections: set[int] = set()
         self._send_locks: dict[str, asyncio.Lock] = {}
+        self._connection_sequence = 0
 
     async def run(self) -> None:
         LOGGER.info("Starting Aruba BLE receiver on %s:%s", self.host, self.port)
@@ -88,6 +94,8 @@ class ArubaBleReceiver:
         self.stats.connections_opened += 1
         self.stats.last_peer = peer_name
         connection_id = id(websocket)
+        self._connection_sequence += 1
+        capture_connection_id = self._connection_sequence
         if len(self._active_connections) >= MAX_CONNECTIONS:
             self.stats.rejected_connections += 1
             await websocket.close(code=1013, reason="connection limit reached")
@@ -110,6 +118,12 @@ class ArubaBleReceiver:
             try:
                 async for message in websocket:
                     if isinstance(message, str):
+                        self.capture.record_message(
+                            message,
+                            peer=peer_name,
+                            connection_id=capture_connection_id,
+                            outcome="text_ignored",
+                        )
                         self.stats.text_messages += 1
                         connection_text_messages += 1
                         LOGGER.debug("Ignoring text WebSocket message from %s: %s", peer, message)
@@ -122,11 +136,23 @@ class ArubaBleReceiver:
                     try:
                         decoded = self.decoder.decode_message(message)
                     except PermissionError:
+                        self.capture.record_message(
+                            message,
+                            peer=peer_name,
+                            connection_id=capture_connection_id,
+                            outcome="auth_error",
+                        )
                         self.stats.invalid_tokens += 1
                         LOGGER.warning("Closing Aruba WebSocket with invalid token from %s", peer)
                         await websocket.close(code=1008, reason="invalid token")
                         return
                     except Exception:
+                        self.capture.record_message(
+                            message,
+                            peer=peer_name,
+                            connection_id=capture_connection_id,
+                            outcome="decode_error",
+                        )
                         self.stats.decode_errors += 1
                         connection_decode_errors += 1
                         if connection_decode_errors == 1:
@@ -143,6 +169,11 @@ class ArubaBleReceiver:
                             return
                         continue
 
+                    self.capture.record_message(
+                        message,
+                        peer=peer_name,
+                        connection_id=capture_connection_id,
+                    )
                     if not await self._bind_connection_source(
                         websocket,
                         decoded.reporter.source,

@@ -27,6 +27,8 @@ from .const import (
     CONF_ENTRY_TYPE,
     CONF_PARENT_ENTRY_ID,
     DEFAULT_AP_MODEL,
+    DEFAULT_CAPTURE_MAX_BYTES,
+    DEFAULT_CAPTURE_TIMEOUT,
     DEFAULT_ENDPOINT_PATH,
     DOMAIN,
     ENTRY_TYPE_AP_SOURCE,
@@ -360,6 +362,9 @@ class ArubaBleProxyRuntime:
                 )
 
     def _handle_receiver_task_done(self, task: asyncio.Task) -> None:
+        capture = getattr(self._receiver, "capture", None)
+        if capture is not None:
+            capture.stop("receiver_stopped")
         if task.cancelled():
             return
         try:
@@ -375,6 +380,9 @@ class ArubaBleProxyRuntime:
         self._notify_listeners()
 
     async def async_stop(self) -> None:
+        capture = getattr(self._receiver, "capture", None)
+        if capture is not None:
+            capture.clear()
         await self._async_cancel_deferred_notification_disables()
         await self._async_disconnect_active_devices_on_stop()
         self._unregister_scanners()
@@ -386,6 +394,32 @@ class ArubaBleProxyRuntime:
         except asyncio.CancelledError:
             pass
         self._task = None
+
+    def start_packet_capture(
+        self,
+        *,
+        device_mac: str | None = None,
+        timeout: int = DEFAULT_CAPTURE_TIMEOUT,
+        max_bytes: int = DEFAULT_CAPTURE_MAX_BYTES,
+    ) -> dict[str, Any]:
+        """Start a bounded capture on this listener's receiver."""
+        if self._task is None or self._task.done():
+            raise ValueError("The selected Aruba BLE Proxy receiver is not running")
+        return self._receiver.capture.start(
+            device_mac=device_mac, timeout=timeout, max_bytes=max_bytes
+        )
+
+    def stop_packet_capture(self) -> dict[str, Any]:
+        """Stop capture while retaining packets for diagnostics download."""
+        return self._receiver.capture.stop()
+
+    def packet_capture_status(self) -> dict[str, Any]:
+        """Return capture metadata without copying retained packet contents."""
+        return self._receiver.capture.status()
+
+    def export_packet_capture(self) -> dict[str, Any]:
+        """Return the redacted, JSON-safe capture for diagnostics."""
+        return self._receiver.capture.export()
 
     async def _async_cancel_deferred_notification_disables(self) -> None:
         """Cancel notification-disable work that must not outlive the runtime."""

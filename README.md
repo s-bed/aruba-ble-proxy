@@ -60,6 +60,41 @@ Multiple APs can share a cluster WebSocket connection. Each retains its own scan
 
 **Active BLE fails?** Check Home Assistant logs and the device's GATT support. Include AP model, firmware, Home Assistant version, integration version and whether passive advertisements work when [reporting an issue](https://github.com/robertoamd90/aruba-ble-proxy/issues). Remove tokens and private data from logs before sharing.
 
+### Download debug packets
+
+An administrator can capture received Aruba messages for a specific BLE device or the whole listener:
+
+1. Open **Developer tools → Actions**, select **Aruba BLE Proxy: Start packet capture**, and run it. Leave **Device MAC** empty for the whole receiving listener, or enter a BLE MAC such as `AA:BB:CC:DD:EE:FF` to keep only that device's records across all reporting APs.
+2. Reproduce the problem. The default capture stops after **60 seconds** or when it reaches the **1 MiB** retained-memory budget, including packet JSON and storage overhead. You can set a timeout from 1 to 300 seconds and a budget from 1 KiB to 10 MiB. Reaching either limit stops collection and keeps the packets already captured.
+3. To finish early, run **Aruba BLE Proxy: Stop packet capture**. You can also download a snapshot while capture is running.
+4. Open **Settings → Devices & services → Aruba BLE Proxy**, open the **listener entry's** three-dot menu, and select **Download diagnostics**. The JSON contains `packet_capture` with capture settings, stop reason, counters, and the captured `packets`. See Home Assistant's [diagnostics download instructions](https://www.home-assistant.io/docs/configuration/troubleshooting/#download-diagnostics).
+
+When more than one listener is configured, select **Listener** in both actions. An AP entry selects its parent listener; it does not limit capture to that AP. Download diagnostics from that parent listener, because AP child diagnostics do not contain packet captures. Action responses, when requested, return capture status and download instructions without the packet contents.
+
+For example, start a whole-listener capture from the Actions YAML editor:
+
+```yaml
+action: aruba_ble_proxy.start_capture
+data:
+  timeout: 60
+  max_bytes: 1048576
+```
+
+To capture a specific device on a selected listener, add the optional fields:
+
+```yaml
+action: aruba_ble_proxy.start_capture
+data:
+  entry_id: YOUR_LISTENER_ENTRY_ID
+  device_mac: "AA:BB:CC:DD:EE:FF"
+  timeout: 120
+  max_bytes: 2097152
+```
+
+Stop with `aruba_ble_proxy.stop_capture`, using the same `entry_id` if needed. A new capture replaces the previous completed capture; stop an active capture before starting another. Captures are held only in memory, begin when requested, and disappear on integration reload or Home Assistant restart. The memory budget covers retained packets; decoding messages and generating a download use additional temporary memory.
+
+The whole-listener capture includes received application messages with decoded protobuf fields, reporting AP and connection details. Protobuf byte fields use base64 in JSON. Device filtering removes unrelated device record sections and excludes text/decode-error metadata that cannot be attributed to a device. The whole-listener mode retains metadata for those messages without their raw contents. Access-token fields and configured-token values are removed before packets are retained; raw encoded protobuf and TCP frames are not exported. Device identifiers and BLE payloads remain in the file. Aruba-side filtering still applies, so advertisements the AP never forwards cannot appear.
+
 ## Limits
 
 - Aruba filtering means this is not a universal catch-all proxy for every nearby BLE advertisement.
